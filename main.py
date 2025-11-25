@@ -21,7 +21,6 @@ data_dir = '../Dataset/COCO'
 def train(args, params):
     # Model
     model = nn.yolo_v11_n(len(params['names']))
-    model.cuda()
 
     # Optimizer
     accumulate = max(round(64 / (args.batch_size * args.world_size)), 1)
@@ -92,12 +91,11 @@ def train(args, params):
                 step = i + num_steps * epoch
                 scheduler.step(step, optimizer)
 
-                samples = samples.cuda().float() / 255
+                samples = samples.float() / 255
 
                 # Forward
-                with torch.amp.autocast('cuda'):
-                    outputs = model(samples)  # forward
-                    loss_box, loss_cls, loss_dfl = criterion(outputs, targets)
+                outputs = model(samples)  # forward
+                loss_box, loss_cls, loss_dfl = criterion(outputs, targets)
 
                 avg_box_loss.update(loss_box.item(), samples.size(0))
                 avg_cls_loss.update(loss_cls.item(), samples.size(0))
@@ -123,12 +121,10 @@ def train(args, params):
                     if ema:
                         ema.update(model)
 
-                torch.cuda.synchronize()
 
                 # Log
                 if args.local_rank == 0:
-                    memory = f'{torch.cuda.memory_reserved() / 1E9:.4g}G'  # (GB)
-                    s = ('%10s' * 2 + '%10.3g' * 3) % (f'{epoch + 1}/{args.epochs}', memory,
+                    s = ('%10s' * 2 + '%10.3g' * 3) % (f'{epoch + 1}/{args.epochs}', 0,
                                                        avg_box_loss.avg, avg_cls_loss.avg, avg_dfl_loss.avg)
                     p_bar.set_description(s)
 
@@ -180,14 +176,14 @@ def test(args, params, model=None):
     plot = False
     if not model:
         plot = True
-        model = torch.load(f='./weights/best.pt', map_location='cuda')
+        model = torch.load(f='./weights/best.pt', map_location='cpu')
         model = model['model'].float().fuse()
 
     model.half()
     model.eval()
 
     # Configure
-    iou_v = torch.linspace(start=0.5, end=0.95, steps=10).cuda()  # iou vector for mAP@0.5:0.95
+    iou_v = torch.linspace(start=0.5, end=0.95, steps=10)  # iou vector for mAP@0.5:0.95
     n_iou = iou_v.numel()
 
     m_pre = 0
@@ -197,11 +193,10 @@ def test(args, params, model=None):
     metrics = []
     p_bar = tqdm.tqdm(loader, desc=('%10s' * 5) % ('', 'precision', 'recall', 'mAP50', 'mAP'))
     for samples, targets in p_bar:
-        samples = samples.cuda()
         samples = samples.half()  # uint8 to fp16/32
         samples = samples / 255.  # 0 - 255 to 0.0 - 1.0
         _, _, h, w = samples.shape  # batch-size, channels, height, width
-        scale = torch.tensor((w, h, w, h)).cuda()
+        scale = torch.tensor((w, h, w, h))
         # Inference
         outputs = model(samples)
         # NMS
@@ -212,14 +207,12 @@ def test(args, params, model=None):
             cls = targets['cls'][idx]
             box = targets['box'][idx]
 
-            cls = cls.cuda()
-            box = box.cuda()
 
-            metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).cuda()
+            metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool)
 
             if output.shape[0] == 0:
                 if cls.shape[0]:
-                    metrics.append((metric, *torch.zeros((2, 0)).cuda(), cls.squeeze(-1)))
+                    metrics.append((metric, *torch.zeros((2, 0)), cls.squeeze(-1)))
                 continue
             # Evaluate
             if cls.shape[0]:
@@ -273,7 +266,6 @@ def main():
     args.distributed = int(os.getenv('WORLD_SIZE', 1)) > 1
 
     if args.distributed:
-        torch.cuda.set_device(device=args.local_rank)
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
     if args.local_rank == 0:
@@ -296,7 +288,6 @@ def main():
     # Clean
     if args.distributed:
         torch.distributed.destroy_process_group()
-    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
